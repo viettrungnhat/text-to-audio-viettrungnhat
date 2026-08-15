@@ -1,0 +1,11 @@
+.venv312/
+.venv_clean/
+venv313/
+venv_py313/
+__pycache__/
+*.pyc
+.DS_Store
+TextToMp3Launcher.iconset/
+pipelines/.tts_cache/
+node_modules
+node_modules
