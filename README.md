@@ -4,6 +4,8 @@
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-lightgrey.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Private-red.svg)]()
 
+Phần mềm này là để bổ trợ cho các ứng dụng mobile, web... Thuộc sở hữu của Bảo Ngọc EduSoft Studio - 0986. 183 806.
+
 Ứng dụng text-to-speech đa ngôn ngữ dùng Python/Tkinter, tối ưu cho chạy cục bộ trên macOS và Windows.
 
 ## Tính năng chính
