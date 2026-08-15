@@ -1,28 +1,18 @@
-# TextToMp3 Portable
+# text-to-audio-viettrungnhat
 
-Ban portable chay o:
+Project text-to-speech đa ngôn ngữ dùng Python/Tkinter.
 
-`TextToMp3Portable/TextToMp3App_0426.pyw`
+## Chạy nhanh trên macOS
 
-## Chay app
+Mở [TextToMp3Launcher.app](TextToMp3Launcher.app) để chạy đúng code mới nhất trong repo bằng môi trường `.venv312`.
 
-1. Cai Python 3.10+ tren may moi.
-2. Cai thu vien:
-
-```bash
-pip install -r requirements.txt
-```
-
-3. Mo file:
+## Chạy bằng Terminal
 
 ```bash
-python TextToMp3Portable/TextToMp3App_0426.pyw
+cd /path/to/text-to-audio-viettrungnhat
+./.venv312/bin/python app.pyw
 ```
 
-Lan chay dau app se hoi mat khau de mo `secrets.enc`.
+## Hướng dẫn máy khác
 
-## Luu y
-
-- Khong commit `TextToMp3Portable/AppData/`.
-- Secret duoc luu trong `TextToMp3Portable/secrets.enc`.
-- Neu muon tu dong chay ma khong nhap mat khau, dat bien moi truong `TEXTTOMP3_VAULT_PASSWORD`.
+Xem [docs/run-on-another-machine.md](docs/run-on-another-machine.md).
