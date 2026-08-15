@@ -15,6 +15,7 @@ Phần mềm này là để bổ trợ cho các ứng dụng mobile, web... Thu�
 - Có khu vực quản lý API key, Discord webhook và AWS.
 - Giao diện Tkinter có sẵn launcher trên macOS để mở nhanh.
 - Hỗ trợ xuất âm thanh, lưu cấu hình, và chạy đúng code mới nhất trong repo.
+ĐỌc luân phiên, sole nam nữ đa ngôn ngữ, xuất audio chuẩn m4a nhẹ nhất vẫn rõ lời
 
 ## Mockup giao diện
 
