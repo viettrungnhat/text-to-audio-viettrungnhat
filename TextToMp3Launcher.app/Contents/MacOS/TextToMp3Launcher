@@ -3,6 +3,6 @@ set -euo pipefail
 APP_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$APP_DIR"
 LOG_FILE="${TMPDIR:-/tmp}/texttomp3m4a_launcher.log"
-"$APP_DIR/.venv312/bin/python" app.pyw >"$LOG_FILE" 2>&1 &
+"$APP_DIR/.venv311/bin/python" app.pyw >"$LOG_FILE" 2>&1 &
 osascript -e 'tell application "System Events" to set frontmost of process "Python" to true' >/dev/null 2>&1 || true
 exit 0

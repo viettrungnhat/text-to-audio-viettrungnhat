@@ -2,6 +2,7 @@ langdetect
 gTTS
 openai
 google-genai
+google-cloud-texttospeech
 Pillow
 numpy
 opencv-python

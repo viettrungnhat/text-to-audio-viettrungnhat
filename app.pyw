@@ -31,6 +31,40 @@ if os.path.isdir(FFMPEG_BUNDLE_DIR):
     os.environ["PATH"] = FFMPEG_BUNDLE_DIR + os.pathsep + os.environ.get("PATH", "")
     os.environ.setdefault("FFMPEG_BINARY", os.path.join(FFMPEG_BUNDLE_DIR, "ffmpeg"))
     os.environ.setdefault("IMAGEIO_FFMPEG_EXE", os.path.join(FFMPEG_BUNDLE_DIR, "ffmpeg"))
+
+TCLTK_ROOT = "/usr/local/Cellar/tcl-tk/9.0.4/lib"
+os.environ.setdefault("TK_LIBRARY", os.path.join(TCLTK_ROOT, "tk9.0"))
+os.environ.setdefault("TCL_LIBRARY", os.path.join(TCLTK_ROOT, "tcl9.0"))
+os.environ.setdefault("TK_SILENCE_DEPRECATION", "1")
+
+
+def _load_env_file(path):
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as env_file:
+            for raw_line in env_file:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except Exception as exc:
+        print(f"⚠ Không đọc được file .env: {exc}")
+
+
+_load_env_file(os.path.join(BASE_DIR, ".env"))
+
+
+def _env_or(value, *env_keys):
+    for env_key in env_keys:
+        env_value = os.environ.get(env_key, "").strip()
+        if env_value:
+            return env_value
+    return value
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
@@ -49,14 +83,13 @@ def check_already_running(port=65432):
     try:
         s.bind(('127.0.0.1', port))
     except socket.error:
-        print("Ứng dụng đã chạy!")
-        sys.exit()
+        return
 
     # Ngăn socket bị đóng: lưu vào biến global
     global singleton_socket
     singleton_socket = s
 
-check_already_running()
+# Không chặn mở app nếu instance cũ còn giữ cổng; macOS launcher sẽ tự mở bản hiện tại.
 
 
 #============
@@ -340,7 +373,10 @@ def _load_legacy_bundle():
 
 
 def _load_secret_bundle():
-    secret_password = _prompt_vault_password()
+    secret_password = os.environ.get(SECRET_VAULT_PASSWORD_ENV, "").strip()
+    if not secret_password:
+        print("ℹ️ Bỏ qua secrets.enc vì chưa có mật khẩu vault; dùng .env/AppData trước.")
+        return _load_legacy_bundle()
 
     if os.path.exists(SECRET_VAULT_FILE):
         try:
@@ -405,8 +441,9 @@ def _sync_local_secret_files(secret_bundle):
 # === FILE cấu hình ===
 CONFIG_FILE = os.path.join(APPDATA_ROOT, "config.json")
 
-secret_bundle = _load_secret_bundle()
-config_default = _sync_local_secret_files(secret_bundle)
+# Defer heavy secret loading until after the main window appears.
+secret_bundle = {}
+config_default = {}
 
 # === Đọc file config chính ===
 if os.path.exists(CONFIG_FILE):
@@ -539,6 +576,41 @@ def _save_hsk30_builder_state(*, version=None, level=None, pack_version=None, ou
         print(f"⚠ Không lưu được state HSK 3.0: {exc}")
 
 
+def _load_secret_bundle_after_ui():
+    global secret_bundle, config_default, config
+    try:
+        if not os.environ.get(SECRET_VAULT_PASSWORD_ENV, "").strip():
+            print("ℹ️ Bỏ qua load secrets.enc lúc khởi động để mở UI nhanh hơn.")
+            return
+        loaded_secret_bundle = _load_secret_bundle()
+        loaded_config_default = _sync_local_secret_files(loaded_secret_bundle)
+        secret_bundle = loaded_secret_bundle
+        config_default = loaded_config_default
+
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        else:
+            config = {}
+
+        # Refresh the most common secrets from the loaded local defaults.
+        globals().update({
+            "SENDER_EMAIL": _env_or(config.get("SENDER_EMAIL", config_default.get("SENDER_EMAIL", "")), "SENDER_EMAIL"),
+            "SENDER_NAME": _env_or(config.get("SENDER_NAME", config_default.get("SENDER_NAME", "")), "SENDER_NAME"),
+            "APP_PASSWORD": _env_or(config.get("APP_PASSWORD", config_default.get("APP_PASSWORD", "")), "APP_PASSWORD"),
+            "AWS_ACCESS_KEY_ID": _env_or(config.get("AWS_ACCESS_KEY_ID", config_default.get("AWS_ACCESS_KEY_ID", "")), "AWS_ACCESS_KEY_ID"),
+            "AWS_SECRET_ACCESS_KEY": _env_or(config.get("AWS_SECRET_ACCESS_KEY", config_default.get("AWS_SECRET_ACCESS_KEY", "")), "AWS_SECRET_ACCESS_KEY"),
+            "AWS_REGION": _env_or(config.get("AWS_REGION", config_default.get("AWS_REGION", "ap-southeast-2")), "AWS_REGION"),
+            "GEMINI_API_KEY": _env_or(config.get("GEMINI_API_KEY", config_default.get("GEMINI_API_KEY", "")).strip(), "GEMINI_API_KEY"),
+            "GOOGLE_TTS_API_KEY": _env_or(config.get("GOOGLE_TTS_API_KEY", "").strip(), "GOOGLE_TTS_API_KEY"),
+            "DISCORD_WEBHOOK_URL": _env_or(config.get("DISCORD_WEBHOOK_URL", config_default.get("DISCORD_WEBHOOK_URL", "")).strip(), "DISCORD_WEBHOOK_URL"),
+        })
+        if "GOOGLE_TTS_PROFILES" in config:
+            _load_google_tts_profiles_from_config()
+    except Exception as exc:
+        print(f"⚠ Không nạp được secrets sau khi mở UI: {exc}")
+
+
 def _guess_hsk30_sheet_from_state(sheet_names, version, level):
     try:
         from pipelines.vocab_zip_builder import SHEET_SELECTIONS, _normalize_sheet_name
@@ -592,6 +664,10 @@ APP_PASSWORD = config.get("APP_PASSWORD", config_default.get("APP_PASSWORD", "")
 AWS_ACCESS_KEY_ID = config.get("AWS_ACCESS_KEY_ID", config_default.get("AWS_ACCESS_KEY_ID", ""))
 AWS_SECRET_ACCESS_KEY = config.get("AWS_SECRET_ACCESS_KEY", config_default.get("AWS_SECRET_ACCESS_KEY", ""))
 AWS_REGION = config.get("AWS_REGION", config_default.get("AWS_REGION", "ap-southeast-2"))
+GEMINI_API_KEY = _env_or(config.get("GEMINI_API_KEY", "").strip(), "GEMINI_API_KEY")
+GOOGLE_TTS_API_KEY = _env_or(config.get("GOOGLE_TTS_API_KEY", "").strip(), "GOOGLE_TTS_API_KEY")
+DISCORD_WEBHOOK_URL = _env_or(config.get("DISCORD_WEBHOOK_URL", "").strip(), "DISCORD_WEBHOOK_URL")
+GITHUB_MODELS_TOKEN = _env_or(config.get("GITHUB_MODELS_TOKEN", "").strip(), "GITHUB_MODELS_TOKEN")
 
 
 
@@ -1033,10 +1109,13 @@ def _create_github_models_client(token):
     """
     if not token:
         return None
-    return OpenAI(base_url=GITHUB_MODELS_BASE_URL, api_key=token)
+    try:
+        return OpenAI(base_url=GITHUB_MODELS_BASE_URL, api_key=token)
+    except ImportError as exc:
+        print(f"⚠ Không khởi tạo được GitHub Models client: {exc}")
+        return None
 
 
-GITHUB_MODELS_TOKEN = config.get("GITHUB_MODELS_TOKEN", "").strip()
 if not is_valid(GITHUB_MODELS_TOKEN, is_github_models_token):
     thong_bao_loi_cauhinh(
         "GitHub Models token",
@@ -1045,15 +1124,11 @@ if not is_valid(GITHUB_MODELS_TOKEN, is_github_models_token):
     )
     GITHUB_MODELS_TOKEN = ""
 
-GEMINI_API_KEY = config.get("GEMINI_API_KEY", "").strip()
 if not is_valid(GEMINI_API_KEY, is_gemini):
     thong_bao_loi_cauhinh("Gemini API Key", "Sai định dạng hoặc rỗng → dùng mặc định.", hien_popup=False)
     GEMINI_API_KEY = config_default.get("GEMINI_API_KEY", "")
 
 # Google Cloud Text-to-Speech dùng key riêng với key Gemini.
-GOOGLE_TTS_API_KEY = config.get("GOOGLE_TTS_API_KEY", "").strip()
-
-DISCORD_WEBHOOK_URL = config.get("DISCORD_WEBHOOK_URL", "").strip()
 if not is_valid(DISCORD_WEBHOOK_URL, is_webhook):
     thong_bao_loi_cauhinh("Discord Webhook", "Không chứa /api/webhooks → dùng mặc định.", hien_popup=False)
     DISCORD_WEBHOOK_URL = config_default.get("DISCORD_WEBHOOK_URL", "")
@@ -8839,6 +8914,27 @@ btn_bung_man_hinh = tk.Button(
 )
 btn_bung_man_hinh.place(x=10, y=8, width=120, height=28)
 
+def mo_cai_dat_popup(event=None):
+    try:
+        x = root.winfo_rootx() + 10
+        y = root.winfo_rooty() + 40
+        menu_cai_dat.tk_popup(x, y)
+    finally:
+        try:
+            menu_cai_dat.grab_release()
+        except Exception:
+            pass
+
+btn_cai_dat = tk.Button(
+    root,
+    text="Cai dat",
+    font=("Arial", 10, "bold"),
+    bg="#e8f0fe",
+    fg="#0b57d0",
+    command=mo_cai_dat_popup,
+)
+btn_cai_dat.place(x=138, y=8, width=90, height=28)
+
 # Cố định kích thước và canh giữa màn hình
 root.update_idletasks()
 width, height = 1380, 760
@@ -8991,6 +9087,7 @@ def _bring_root_to_front():
         pass
 
 root.after(300, _bring_root_to_front)
+root.after(500, lambda: threading.Thread(target=_load_secret_bundle_after_ui, daemon=True).start())
 
 #============
 def cau_hinh_khoi_dong_cung_win():
@@ -9626,25 +9723,25 @@ def mo_popup_ung_dung_khac():
 # MENU CẤU HÌNH ===
 
 menu_cai_dat = tk.Menu(root, tearoff=0)
-menu_cai_dat.add_command(label="🖥️ Khởi động cùng Windows", command=cau_hinh_khoi_dong_cung_win)
+menu_cai_dat.add_command(label="Khoi dong cung Windows", command=cau_hinh_khoi_dong_cung_win)
 menu_cai_dat.add_separator()
-menu_cai_dat.add_command(label="ℹ️ Giới thiệu Ứng dụng", command=gioi_thieu_ung_dung)
+menu_cai_dat.add_command(label="Gioi thieu ung dung", command=gioi_thieu_ung_dung)
 menu_cai_dat.add_separator()
 menu_cai_dat.add_separator()
-menu_cai_dat.add_command(label="🔑 Đổi mật khẩu toàn ứng dụng", command=doi_mat_khau)
-menu_cai_dat.add_command(label="🔧 Sửa GitHub Models Token", command=lambda: sua_key_don("GitHub Models Token", "GITHUB_MODELS_TOKEN", "GitHub PAT hiện tại:", "Nhập GitHub PAT mới:", show_pw=True))
-menu_cai_dat.add_command(label="🔧 Gemini API KEY cho khung chat", command=lambda: sua_key_don("Gemini API KEY cho khung chat", "GEMINI_API_KEY", "Gemini Key hiện tại:", "Nhập Gemini Key mới:", show_pw=True))
-menu_cai_dat.add_command(label="🔧 API key cho Google TTS", command=lambda: sua_key_don("API key cho Google TTS", "GOOGLE_TTS_API_KEY", "Google TTS Key hiện tại:", "Nhập Google TTS Key mới:", show_pw=True))
-menu_cai_dat.add_command(label="🔧 Sửa Discord Webhook", command=lambda: sua_key_don("Discord Webhook", "DISCORD_WEBHOOK_URL", "Webhook Discord hiện tại:", "Nhập Webhook Discord mới:"))
+menu_cai_dat.add_command(label="Doi mat khau toan ung dung", command=doi_mat_khau)
+menu_cai_dat.add_command(label="Sua GitHub Models Token", command=lambda: sua_key_don("GitHub Models Token", "GITHUB_MODELS_TOKEN", "GitHub PAT hiện tại:", "Nhập GitHub PAT mới:", show_pw=True))
+menu_cai_dat.add_command(label="Sua Gemini API KEY cho khung chat", command=lambda: sua_key_don("Gemini API KEY cho khung chat", "GEMINI_API_KEY", "Gemini Key hiện tại:", "Nhập Gemini Key mới:", show_pw=True))
+menu_cai_dat.add_command(label="API key cho Google TTS", command=lambda: sua_key_don("API key cho Google TTS", "GOOGLE_TTS_API_KEY", "Google TTS Key hiện tại:", "Nhập Google TTS Key mới:", show_pw=True))
+menu_cai_dat.add_command(label="Sua Discord Webhook", command=lambda: sua_key_don("Discord Webhook", "DISCORD_WEBHOOK_URL", "Webhook Discord hiện tại:", "Nhập Webhook Discord mới:"))
 menu_cai_dat.add_separator()
-menu_cai_dat.add_command(label="📦 Tải các ứng dụng khác", command=mo_popup_ung_dung_khac)
+menu_cai_dat.add_command(label="Tai cac ung dung khac", command=mo_popup_ung_dung_khac)
 # Disabled: game image downloader menu removed in audio-tool version.
 # menu_cai_dat.add_command(label="📥 Tải ảnh còn thiếu cho Game Đoán Chữ", command=tai_anh_con_thieu_game_thread)
 
 
 
 menu_cai_dat.add_command(
-    label="🔧 Sửa Email & App Password",
+    label="Sua Email va App Password",
     command=lambda: sua_key_nhom(
         "Email & App Password",
         ["SENDER_EMAIL", "SENDER_NAME", "APP_PASSWORD"],
@@ -9654,7 +9751,7 @@ menu_cai_dat.add_command(
 )
 
 menu_cai_dat.add_command(
-    label="🔧 Sửa AWS Keys",
+    label="Sua AWS Keys",
     command=lambda: sua_key_nhom(
         "AWS Keys",
         ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"],
@@ -9666,17 +9763,9 @@ menu_cai_dat.add_command(
 
 # Chỉ cần tạo 1 menubar, gắn menu_cai_dat:
 menubar = tk.Menu(root)
-menubar.add_cascade(label="Cài đặt", menu=menu_cai_dat)
-root.config(menu=menubar)
-
-
-# === Gắn vào menu chính ===
-try:
-    menu_bar.add_cascade(label="⚙️ Cài đặt", menu=menu_cai_dat)
-except:
-    menu_bar = tk.Menu(root)
-    menu_bar.add_cascade(label="⚙️ Cài đặt", menu=menu_cai_dat)
-    root.config(menu=menu_bar)
+menubar.add_cascade(label="Cai dat", menu=menu_cai_dat)
+if sys.platform != "darwin":
+    root.config(menu=menubar)
 
 #+++++++=====
 # PHÍM TẮT MÀN HÌNH TẠM THỜI
