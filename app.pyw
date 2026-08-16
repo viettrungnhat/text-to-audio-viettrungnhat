@@ -23,6 +23,7 @@ import signal
 import random
 import socket
 from datetime import datetime
+import traceback
 from pathlib import Path
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -65,6 +66,43 @@ def _env_or(value, *env_keys):
         if env_value:
             return env_value
     return value
+
+
+BOOT_LOG_FILE = os.environ.get("TEXTTOMP3_BOOT_LOG", "").strip()
+
+
+def boot_log(message):
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{stamp}] {message}"
+    print(line, flush=True)
+
+
+def _install_boot_exception_hooks():
+    def _write_traceback(prefix, exc_type, exc_value, exc_tb):
+        text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        boot_log(prefix)
+        for chunk in text.rstrip().splitlines():
+            boot_log(chunk)
+
+    def _sys_hook(exc_type, exc_value, exc_tb):
+        _write_traceback("Unhandled exception during startup/runtime:", exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _sys_hook
+
+    if hasattr(threading, "excepthook"):
+        def _thread_hook(args):
+            _write_traceback(
+                f"Unhandled thread exception in {getattr(args.thread, 'name', 'thread')}:",
+                args.exc_type,
+                args.exc_value,
+                args.exc_traceback,
+            )
+
+        threading.excepthook = _thread_hook
+
+
+_install_boot_exception_hooks()
+boot_log("Bootstrap started")
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
@@ -162,6 +200,8 @@ def app_beep(freq=1000, duration=200, widget=None):
 
 
 def attach_mouse_text_menu(widget):
+    if sys.platform == "darwin":
+        return
     menu = tk.Menu(widget, tearoff=0)
 
     def popup(event):
@@ -770,8 +810,10 @@ def tao_file_mp3(text, lang="vi", voice="Mặc định", toc_do="Bình thường
         if (lang or "").lower().startswith("vi"):
             slow = False
         else:
-            slow = (toc_do == "Chậm")
-
+            try:
+                require_ffmpeg_path()
+            except Exception as exc:
+                messagebox.showerror("Lỗi", str(exc))
 
         # ✅ Làm sạch văn bản (không để None)
         try:
@@ -1189,10 +1231,32 @@ def pick_existing_asset(*names):
 
 def pick_existing_executable(*names):
     for name in names:
-        candidate = os.path.join(BASE_DIR, name)
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
+        candidate_paths = [name]
+        if not os.path.isabs(name):
+            candidate_paths.extend([
+                os.path.join(BASE_DIR, name),
+                os.path.join(FOLDER, name),
+            ])
+
+        for candidate in candidate_paths:
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return os.path.abspath(candidate)
     return None
+
+
+def find_ffmpeg_in_dir(search_root):
+    if not search_root or not os.path.isdir(search_root):
+        return None, None, None
+
+    for current_root, _, files in os.walk(search_root):
+        if "ffmpeg" in files or "ffmpeg.exe" in files:
+            ffmpeg_name = "ffmpeg" if "ffmpeg" in files else "ffmpeg.exe"
+            ffprobe_name = "ffprobe" if "ffprobe" in files else "ffprobe.exe"
+            ffmpeg_path = os.path.join(current_root, ffmpeg_name)
+            ffprobe_path = os.path.join(current_root, ffprobe_name)
+            return ffmpeg_path, ffprobe_path if os.path.isfile(ffprobe_path) else ffmpeg_path, current_root
+
+    return None, None, None
 
 CLICK_SOUND = pick_existing_asset("click.ogg", "click.wav")
 WARNING_SOUND = pick_existing_asset("warning.ogg", "warning.wav")
@@ -1225,12 +1289,18 @@ FOLDER = os.path.dirname(os.path.abspath(sys.argv[0]))
 
 FFMPEG_DOWNLOAD_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 
-def resolve_ffmpeg_paths():
-    bundle_folder = os.path.join(FOLDER, "ffmpeg_bin", "bin")
-    bundle_ffmpeg = pick_existing_executable(os.path.join("ffmpeg_bin", "bin", "ffmpeg"), os.path.join("ffmpeg_bin", "bin", "ffmpeg.exe"))
-    bundle_ffprobe = pick_existing_executable(os.path.join("ffmpeg_bin", "bin", "ffprobe"), os.path.join("ffmpeg_bin", "bin", "ffprobe.exe"))
-    if bundle_ffmpeg:
-        return bundle_ffmpeg, bundle_ffprobe or bundle_ffmpeg, bundle_folder
+def resolve_ffmpeg_paths(allow_download=False):
+    boot_log(f"Resolving ffmpeg paths (allow_download={allow_download})")
+    search_roots = []
+    for root in (BASE_DIR, FOLDER):
+        bundle_folder = os.path.join(root, "ffmpeg_bin", "bin")
+        if bundle_folder not in search_roots:
+            search_roots.append(bundle_folder)
+
+    for bundle_folder in search_roots:
+        bundle_ffmpeg, bundle_ffprobe, found_folder = find_ffmpeg_in_dir(bundle_folder)
+        if bundle_ffmpeg:
+            return bundle_ffmpeg, bundle_ffprobe or bundle_ffmpeg, found_folder or bundle_folder
 
     system_ffmpeg = shutil.which("ffmpeg")
     system_ffprobe = shutil.which("ffprobe")
@@ -1239,19 +1309,12 @@ def resolve_ffmpeg_paths():
 
     cache_root = os.path.join(APPDATA_ROOT, "ffmpeg_bin")
     cache_folder = os.path.join(cache_root, "bin")
-    cache_ffmpeg = pick_existing_executable("ffmpeg", "ffmpeg.exe")
-    cache_ffprobe = pick_existing_executable("ffprobe", "ffprobe.exe")
+    cache_ffmpeg, cache_ffprobe, cache_found_folder = find_ffmpeg_in_dir(cache_folder)
     if cache_ffmpeg:
-        return cache_ffmpeg, cache_ffprobe or cache_ffmpeg, cache_folder
+        return cache_ffmpeg, cache_ffprobe or cache_ffmpeg, cache_found_folder or cache_folder
 
-    def find_ffmpeg_folder(search_root):
-        for current_root, _, files in os.walk(search_root):
-            if "ffmpeg" in files or "ffmpeg.exe" in files:
-                ffmpeg_name = "ffmpeg" if "ffmpeg" in files else "ffmpeg.exe"
-                ffprobe_name = "ffprobe" if "ffprobe" in files else "ffprobe.exe"
-                ffmpeg_path = os.path.join(current_root, ffmpeg_name)
-                ffprobe_path = os.path.join(current_root, ffprobe_name)
-                return ffmpeg_path, ffprobe_path if os.path.isfile(ffprobe_path) else ffmpeg_path, current_root
+    if not allow_download:
+        print("⚠️ Không tìm thấy ffmpeg khi khởi động; sẽ tải khi cần xuất audio.")
         return None, None, None
 
     try:
@@ -1273,16 +1336,17 @@ def resolve_ffmpeg_paths():
         except:
             pass
 
-        downloaded = find_ffmpeg_folder(cache_root)
+        downloaded = find_ffmpeg_in_dir(cache_root)
         if downloaded[0]:
             return downloaded
     except Exception as e:
         print(f"⚠️ Tải ffmpeg tự động thất bại: {e}")
 
+    print("⚠️ Không tìm thấy ffmpeg ở:", ", ".join(search_roots), "| AppData:", os.path.join(APPDATA_ROOT, "ffmpeg_bin", "bin"))
     return None, None, None
 
 
-FFMPEG_PATH, ffprobe_path, FFMPEG_FOLDER = resolve_ffmpeg_paths()
+FFMPEG_PATH, ffprobe_path, FFMPEG_FOLDER = resolve_ffmpeg_paths(allow_download=False)
 M4A_VOICE_BITRATE = "48k"
 M4A_VOICE_FALLBACK_BITRATE = "40k"
 M4A_VOICE_SAMPLE_RATE = "22050"
@@ -1291,6 +1355,31 @@ if FFMPEG_PATH:
     AudioSegment.converter = FFMPEG_PATH
     AudioSegment.ffmpeg = FFMPEG_PATH
     AudioSegment.ffprobe = ffprobe_path
+
+
+def require_ffmpeg_path(error_message=None):
+    global FFMPEG_PATH, ffprobe_path, FFMPEG_FOLDER
+    if FFMPEG_PATH and os.path.isfile(FFMPEG_PATH):
+        return FFMPEG_PATH
+    FFMPEG_PATH, ffprobe_path, FFMPEG_FOLDER = resolve_ffmpeg_paths(allow_download=True)
+    if FFMPEG_PATH and os.path.isfile(FFMPEG_PATH):
+        AudioSegment.converter = FFMPEG_PATH
+        AudioSegment.ffmpeg = FFMPEG_PATH
+        AudioSegment.ffprobe = ffprobe_path
+        return FFMPEG_PATH
+    raise ValueError(error_message or "Không tìm thấy ffmpeg trên máy và cũng không có bản đi kèm trong portable.")
+
+
+def run_ffmpeg_command(cmd, startupinfo=None):
+    """Run ffmpeg quietly enough to avoid pipe deadlocks on long exports."""
+    ffmpeg_cmd = [cmd[0], "-hide_banner", "-nostats", "-loglevel", "error", *cmd[1:]]
+    return subprocess.run(
+        ffmpeg_cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        startupinfo=startupinfo,
+    )
 #=======Gửi discor chung
 def gui_discord_thong_bao(msg=""):
     try:
@@ -2603,10 +2692,21 @@ def mo_popup_chon_lang(mo_tu_ben_ngoai=False):
     popup = tk.Toplevel(root)
     set_popup_icon(popup)
     popup.title("Chọn ngôn ngữ từng dòng")
-    popup.geometry("1420x860+40+20")
-    popup.minsize(1240, 760)
+    screen_w = popup.winfo_screenwidth()
+    screen_h = popup.winfo_screenheight()
+    popup_w = min(1380, max(1180, screen_w - 80))
+    popup_h = min(780, max(700, screen_h - 110))
+    popup_x = max(20, (screen_w - popup_w) // 2)
+    popup_y = max(20, (screen_h - popup_h) // 2)
+    popup.geometry(f"{popup_w}x{popup_h}+{popup_x}+{popup_y}")
+    popup.minsize(1100, 680)
+    popup.resizable(True, True)
     popup.grab_set()
     popup.transient(root)
+    popup.option_add("*Label.foreground", "#111111")
+    popup.option_add("*Checkbutton.foreground", "#111111")
+    popup.option_add("*TLabel.foreground", "#111111")
+    popup.option_add("*TCheckbutton.foreground", "#111111")
 
     body_frame = tk.Frame(popup, bg="#eef3ee")
     body_frame.pack(fill="both", expand=True, padx=10, pady=10)
@@ -2643,7 +2743,7 @@ def mo_popup_chon_lang(mo_tu_ben_ngoai=False):
     selected_lang_list = [lang for _, lang in danh_sach]
     
     canvas = tk.Canvas(left_frame, bg="#ffffff", highlightthickness=0)
-    frame = tk.Frame(canvas)
+    frame = tk.Frame(canvas, bg="#ffffff")
     vsb = tk.Scrollbar(left_frame, orient="vertical", command=canvas.yview)
     canvas.configure(yscrollcommand=vsb.set)
 
@@ -3245,6 +3345,8 @@ def mo_popup_chon_lang(mo_tu_ben_ngoai=False):
     def export_m4a_with_fallback(full_audio, output_path, progress_callback=None):
         import tempfile, os, subprocess, uuid
 
+        require_ffmpeg_path("Không tìm thấy ffmpeg. Hãy kiểm tra lại thư mục ffmpeg_bin hoặc cài ffmpeg vào PATH.")
+
         temp_wav = os.path.join(tempfile.gettempdir(), f"temp_{uuid.uuid4().hex}.wav")
         try:
             # Update UI before exporting
@@ -3252,10 +3354,12 @@ def mo_popup_chon_lang(mo_tu_ben_ngoai=False):
                 progress_callback("Đang chuẩn bị audio...", 50)
             
             voice_audio = full_audio.set_channels(1).set_frame_rate(int(M4A_VOICE_SAMPLE_RATE))
+            if progress_callback:
+                progress_callback("Đang ghi WAV tạm...", 70)
             voice_audio.export(temp_wav, format="wav")
 
             if progress_callback:
-                progress_callback("Đang chuyển đổi sang M4A...", 75)
+                progress_callback("Đang chuyển đổi sang M4A...", 85)
 
             # Mono AAC bitrate thấp đủ rõ cho giọng nói và giảm mạnh dung lượng M4A.
             primary_cmd = [
@@ -3268,10 +3372,12 @@ def mo_popup_chon_lang(mo_tu_ben_ngoai=False):
                 "-movflags", "+faststart",
                 output_path,
             ]
-            result = subprocess.run(primary_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            boot_log("M4A export: running primary ffmpeg")
+            result = run_ffmpeg_command(primary_cmd)
             if result.returncode == 0:
                 if progress_callback:
                     progress_callback("Hoàn tất!", 100)
+                boot_log("M4A export: primary ffmpeg finished")
                 return
 
             fallback_cmd = [
@@ -3284,11 +3390,13 @@ def mo_popup_chon_lang(mo_tu_ben_ngoai=False):
                 "-movflags", "+faststart",
                 output_path,
             ]
-            result2 = subprocess.run(fallback_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            boot_log("M4A export: running fallback ffmpeg")
+            result2 = run_ffmpeg_command(fallback_cmd)
             if result2.returncode != 0:
-                raise Exception(result.stderr or result2.stderr or "FFmpeg không xuất được M4A.")
+                raise Exception((result.stderr or result2.stderr or "").strip() or "FFmpeg không xuất được M4A.")
             if progress_callback:
                 progress_callback("Hoàn tất!", 100)
+            boot_log("M4A export: fallback ffmpeg finished")
         finally:
             try:
                 if os.path.exists(temp_wav):
@@ -3379,9 +3487,8 @@ def mo_popup_chon_lang(mo_tu_ben_ngoai=False):
                     clean_text_func=lam_sach_van_ban,
                     tts_func=tao_file_mp3,
                 )
+                update_export_progress("Đã ghép xong dữ liệu, đang đóng gói M4A...", 95)
                 export_audio_batch(full_audio, file_path, output_kind, export_m4a_with_fallback, export_progress_callback=update_export_progress)
-                stop_background_music()
-                popup_progress.destroy()
 
                 def open_file():
                     try:
@@ -3416,35 +3523,65 @@ def mo_popup_chon_lang(mo_tu_ben_ngoai=False):
                         thong_bao_loi_api(e, "Discord")
                         tk.messagebox.showerror("Lỗi", f"Không gửi Discord:\n{e}")
 
-                popup_done = tk.Toplevel(popup)
-                set_popup_icon(popup_done)
+                def finalize_success():
+                    try:
+                        stop_background_music()
+                    except Exception:
+                        pass
+                    try:
+                        if popup_progress.winfo_exists():
+                            popup_progress.destroy()
+                    except Exception:
+                        pass
 
-                pygame.mixer.init()
-                pygame.mixer.music.load(SUCCESS_SOUND)
-                pygame.mixer.music.play()
-                gui_discord_thong_bao(f"🟢 Đã xuất xong file {output_kind.upper()}: {file_path}")
+                    popup_done = tk.Toplevel(popup)
+                    set_popup_icon(popup_done)
 
-                popup_done.title(spec["done_title"])
-                popup_done.geometry("480x180")
-                popup_done.grab_set()
-                popup_done.transient(popup)
+                    try:
+                        pygame.mixer.init()
+                        pygame.mixer.music.load(SUCCESS_SOUND)
+                        pygame.mixer.music.play()
+                    except Exception:
+                        pass
+                    gui_discord_thong_bao(f"🟢 Đã xuất xong file {output_kind.upper()}: {file_path}")
 
-                tk.Label(popup_done, text=spec["done_label"] + file_path, font=("Arial", 11, "bold"), fg="green").pack(pady=13)
-                frm = tk.Frame(popup_done); frm.pack(pady=3)
-                tk.Button(frm, text="Mở file", width=10, command=lambda: [popup_done.destroy(), open_file()]).pack(side="left", padx=6)
-                tk.Button(frm, text="Mở thư mục", width=12, command=lambda: [popup_done.destroy(), open_folder()]).pack(side="left", padx=6)
-                tk.Button(frm, text="Gửi Discord", width=12, command=lambda: [popup_done.destroy(), gui_discord()]).pack(side="left", padx=6)
-                tk.Button(frm, text="Gửi Zalo", width=12, command=lambda: [popup_done.destroy(), open_zalo_and_folder(file_path)]).pack(side="left", padx=6)
-                tk.Button(popup_done, text="Đóng", command=popup_done.destroy).pack(pady=8)
+                    popup_done.title(spec["done_title"])
+                    popup_done.geometry("480x180")
+                    popup_done.grab_set()
+                    popup_done.transient(popup)
+
+                    tk.Label(popup_done, text=spec["done_label"] + file_path, font=("Arial", 11, "bold"), fg="green").pack(pady=13)
+                    frm = tk.Frame(popup_done)
+                    frm.pack(pady=3)
+                    tk.Button(frm, text="Mở file", width=10, command=lambda: [popup_done.destroy(), open_file()]).pack(side="left", padx=6)
+                    tk.Button(frm, text="Mở thư mục", width=12, command=lambda: [popup_done.destroy(), open_folder()]).pack(side="left", padx=6)
+                    tk.Button(frm, text="Gửi Discord", width=12, command=lambda: [popup_done.destroy(), gui_discord()]).pack(side="left", padx=6)
+                    tk.Button(frm, text="Gửi Zalo", width=12, command=lambda: [popup_done.destroy(), open_zalo_and_folder(file_path)]).pack(side="left", padx=6)
+                    tk.Button(popup_done, text="Đóng", command=popup_done.destroy).pack(pady=8)
+
+                popup.after(0, finalize_success)
 
             except Exception as e:
-                stop_background_music()
-                popup_progress.destroy()
-                pygame.mixer.init()
-                pygame.mixer.music.load(WARNING_SOUND)
-                pygame.mixer.music.play()
-                tk.messagebox.showerror("Lỗi", f"Xuất {output_kind.upper()} bị lỗi:\n{e}")
-                gui_discord_thong_bao(f"🟢 Xuất {output_kind.upper()} bị lỗi: {file_path}")
+                def finalize_error():
+                    try:
+                        stop_background_music()
+                    except Exception:
+                        pass
+                    try:
+                        if popup_progress.winfo_exists():
+                            popup_progress.destroy()
+                    except Exception:
+                        pass
+                    try:
+                        pygame.mixer.init()
+                        pygame.mixer.music.load(WARNING_SOUND)
+                        pygame.mixer.music.play()
+                    except Exception:
+                        pass
+                    tk.messagebox.showerror("Lỗi", f"Xuất {output_kind.upper()} bị lỗi:\n{e}")
+                    gui_discord_thong_bao(f"🟢 Xuất {output_kind.upper()} bị lỗi: {file_path}")
+
+                popup.after(0, finalize_error)
 
         threading.Thread(target=thread_xuat, daemon=True).start()
 
@@ -3555,44 +3692,70 @@ def mo_popup_chon_lang(mo_tu_ben_ngoai=False):
                     export_m4a_with_fallback(full_audio, file_path, progress_callback=update_export_progress)
                     files_da_tao.append(file_path)
 
-                stop_background_music()
-                popup_progress.destroy()
-
                 def open_folder():
                     try:
                         open_path_cross_platform(output_dir)
                     except Exception as e:
                         tk.messagebox.showerror("Lỗi", f"Không mở được thư mục:\n{e}")
 
-                pygame.mixer.init()
-                pygame.mixer.music.load(SUCCESS_SOUND)
-                pygame.mixer.music.play()
-                gui_discord_thong_bao(f"🟢 Đã xuất xong M4A MultiFiles: {output_dir}")
+                def finalize_success():
+                    try:
+                        stop_background_music()
+                    except Exception:
+                        pass
+                    try:
+                        if popup_progress.winfo_exists():
+                            popup_progress.destroy()
+                    except Exception:
+                        pass
+                    try:
+                        pygame.mixer.init()
+                        pygame.mixer.music.load(SUCCESS_SOUND)
+                        pygame.mixer.music.play()
+                    except Exception:
+                        pass
+                    gui_discord_thong_bao(f"🟢 Đã xuất xong M4A MultiFiles: {output_dir}")
 
-                popup_done = tk.Toplevel(popup)
-                set_popup_icon(popup_done)
-                popup_done.title("Hoàn tất xuất M4A MultiFiles")
-                popup_done.geometry("500x190")
-                popup_done.grab_set()
-                popup_done.transient(popup)
+                    popup_done = tk.Toplevel(popup)
+                    set_popup_icon(popup_done)
+                    popup_done.title("Hoàn tất xuất M4A MultiFiles")
+                    popup_done.geometry("500x190")
+                    popup_done.grab_set()
+                    popup_done.transient(popup)
 
-                tk.Label(
-                    popup_done,
-                    text=f"🎉 Đã xuất {len(files_da_tao)} file M4A vào:\n" + output_dir,
-                    font=("Arial", 11, "bold"),
-                    fg="green",
-                ).pack(pady=13)
-                frm = tk.Frame(popup_done); frm.pack(pady=3)
-                tk.Button(frm, text="Mở thư mục", width=12, command=lambda: [popup_done.destroy(), open_folder()]).pack(side="left", padx=6)
-                tk.Button(frm, text="Đóng", width=10, command=popup_done.destroy).pack(side="left", padx=6)
+                    tk.Label(
+                        popup_done,
+                        text=f"🎉 Đã xuất {len(files_da_tao)} file M4A vào:\n" + output_dir,
+                        font=("Arial", 11, "bold"),
+                        fg="green",
+                    ).pack(pady=13)
+                    frm = tk.Frame(popup_done)
+                    frm.pack(pady=3)
+                    tk.Button(frm, text="Mở thư mục", width=12, command=lambda: [popup_done.destroy(), open_folder()]).pack(side="left", padx=6)
+                    tk.Button(frm, text="Đóng", width=10, command=popup_done.destroy).pack(side="left", padx=6)
+
+                popup.after(0, finalize_success)
 
             except Exception as e:
-                stop_background_music()
-                popup_progress.destroy()
-                pygame.mixer.init()
-                pygame.mixer.music.load(WARNING_SOUND)
-                pygame.mixer.music.play()
-                tk.messagebox.showerror("Lỗi", f"Xuất M4A MultiFiles bị lỗi:\n{e}")
+                def finalize_error():
+                    try:
+                        stop_background_music()
+                    except Exception:
+                        pass
+                    try:
+                        if popup_progress.winfo_exists():
+                            popup_progress.destroy()
+                    except Exception:
+                        pass
+                    try:
+                        pygame.mixer.init()
+                        pygame.mixer.music.load(WARNING_SOUND)
+                        pygame.mixer.music.play()
+                    except Exception:
+                        pass
+                    tk.messagebox.showerror("Lỗi", f"Xuất M4A MultiFiles bị lỗi:\n{e}")
+
+                popup.after(0, finalize_error)
 
         threading.Thread(target=thread_multi, daemon=True).start()
     def run_xuat_srt_thread():
@@ -3944,7 +4107,7 @@ def mo_popup_chon_lang(mo_tu_ben_ngoai=False):
                             "-pix_fmt", "yuv420p",
                             "-shortest", temp_mp4
                         ]
-                        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, startupinfo=startupinfo)
+                        result = run_ffmpeg_command(cmd, startupinfo=startupinfo)
                         if result.returncode != 0:
                             print("⚠️ FFmpeg stderr:\n", result.stderr)
                             raise Exception(f"❌ Lỗi ffmpeg: {result.stderr}")
@@ -3986,7 +4149,7 @@ def mo_popup_chon_lang(mo_tu_ben_ngoai=False):
                     "-pix_fmt", "yuv420p",
                     temp_output
                 ]
-                result = subprocess.run(cmd_concat, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, startupinfo=startupinfo)
+                result = run_ffmpeg_command(cmd_concat, startupinfo=startupinfo)
                 if result.returncode != 0:
                     print("⚠️ FFmpeg stderr:\n", result.stderr)
                     raise Exception(f"❌ Lỗi nối video: {result.stderr}")
@@ -7942,15 +8105,9 @@ def cutter_sound():
             "-movflags", "+faststart",
             save_path,
         ]
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            startupinfo=startupinfo,
-        )
+        result = run_ffmpeg_command(cmd, startupinfo=startupinfo)
         if result.returncode != 0:
-            raise Exception(result.stderr or "FFmpeg không cắt được M4A giữ nguyên chất lượng.")
+            raise Exception((result.stderr or "").strip() or "FFmpeg không cắt được M4A giữ nguyên chất lượng.")
 
     def export_cut_segment(segment, save_path, source_path=None, start_ms=None, end_ms=None):
         ext = os.path.splitext(save_path)[1].lower()
@@ -8479,12 +8636,12 @@ def goi_popup_game_tu_ben_ngoai():
 #tạo nút - KHUNG HIỂN THỊ NỘI DUNG
 def create_frame_noi_dung(parent):
     frame_noi_dung = tk.LabelFrame(parent, text="📋 Phần mềm xuất mp3 hội thoại đa ngôn ngữ - Máy Học Tập", font=("Arial", 11, "bold"), bg="#f8fff8", fg="green")
-    frame_noi_dung.place(x=10, y=42, width=1360, height=700)
+    frame_noi_dung.place(x=10, y=42, width=1180, height=650)
 
     # Vùng soạn đề/to ra đề + thanh cuộn
     global txt_de
     frame_text = tk.Frame(frame_noi_dung)
-    frame_text.place(x=10, y=8, width=1000, height=540)
+    frame_text.place(x=10, y=8, width=840, height=500)
 
     scrollbar = tk.Scrollbar(frame_text)
     scrollbar.pack(side="right", fill="y")
@@ -8497,7 +8654,7 @@ def create_frame_noi_dung(parent):
 
     # Khung hỏi GitHub Models/Gemini sát mép dưới trái (dưới txt_de)
     frame_hoi_gpt = tk.LabelFrame(frame_noi_dung, text="🧠 Hỏi GitHub Models hoặc Gemini", font=("Arial", 10, "bold"), bg="#f0fff0", fg="darkgreen")
-    frame_hoi_gpt.place(x=10, y=560, width=620, height=105)
+    frame_hoi_gpt.place(x=10, y=520, width=840, height=100)
 
     entry_cau_hoi = tk.Entry(frame_hoi_gpt, font=("Arial", 9))
     entry_cau_hoi.place(x=8, y=8, width=395, height=28)
@@ -8516,7 +8673,7 @@ def create_frame_noi_dung(parent):
 
     # Khung đọc đề sát mép phải (xuất MP3/M4A nằm trong popup chọn ngôn ngữ)
     frame_doc = tk.LabelFrame(frame_noi_dung, text="🎧 Đọc Nội Dung & Chọn Ngôn Ngữ", font=("Arial", 8, "bold"), bg="#f8fff8")
-    frame_doc.place(x=1030, y=8, width=320, height=660)
+    frame_doc.place(x=860, y=8, width=300, height=618)
 
     btn_doc = tk.Button(frame_doc, text="Đọc / Chọn ngôn ngữ", font=("Arial", 14, "bold"),
                         command=lambda: doc_noi_dung_de() if che_do_doc.get() == "Tự động" else mo_popup_chon_lang(), bg="lightyellow")
@@ -8877,7 +9034,9 @@ def dem_so_anh_thieu():
   
 #======tẠO CỬA SỔ gui
 
+boot_log("Creating Tk root")
 root = tk.Tk()
+boot_log("Tk root created")
 #root.state("zoomed")  # Tự full màn hình khi mở
 
 #LOGO APP
@@ -9074,20 +9233,20 @@ root.after(100, _apply_main_layout_now)
 
 def _bring_root_to_front():
     try:
-        root.deiconify()
         try:
-            root.attributes("-fullscreen", False)
+            root.state("normal")
         except Exception:
             pass
+        root.deiconify()
         root.lift()
         root.focus_force()
-        root.attributes("-topmost", True)
-        root.after(1200, lambda: root.attributes("-topmost", False))
     except Exception:
         pass
 
-root.after(300, _bring_root_to_front)
-root.after(500, lambda: threading.Thread(target=_load_secret_bundle_after_ui, daemon=True).start())
+root.after(0, _bring_root_to_front)
+root.after(600, _bring_root_to_front)
+root.after(1800, lambda: threading.Thread(target=_load_secret_bundle_after_ui, daemon=True).start())
+root.after(2500, lambda: boot_log("UI is ready"))
 
 #============
 def cau_hinh_khoi_dong_cung_win():
@@ -9721,51 +9880,7 @@ def mo_popup_ung_dung_khac():
 
 
 # MENU CẤU HÌNH ===
-
-menu_cai_dat = tk.Menu(root, tearoff=0)
-menu_cai_dat.add_command(label="Khoi dong cung Windows", command=cau_hinh_khoi_dong_cung_win)
-menu_cai_dat.add_separator()
-menu_cai_dat.add_command(label="Gioi thieu ung dung", command=gioi_thieu_ung_dung)
-menu_cai_dat.add_separator()
-menu_cai_dat.add_separator()
-menu_cai_dat.add_command(label="Doi mat khau toan ung dung", command=doi_mat_khau)
-menu_cai_dat.add_command(label="Sua GitHub Models Token", command=lambda: sua_key_don("GitHub Models Token", "GITHUB_MODELS_TOKEN", "GitHub PAT hiện tại:", "Nhập GitHub PAT mới:", show_pw=True))
-menu_cai_dat.add_command(label="Sua Gemini API KEY cho khung chat", command=lambda: sua_key_don("Gemini API KEY cho khung chat", "GEMINI_API_KEY", "Gemini Key hiện tại:", "Nhập Gemini Key mới:", show_pw=True))
-menu_cai_dat.add_command(label="API key cho Google TTS", command=lambda: sua_key_don("API key cho Google TTS", "GOOGLE_TTS_API_KEY", "Google TTS Key hiện tại:", "Nhập Google TTS Key mới:", show_pw=True))
-menu_cai_dat.add_command(label="Sua Discord Webhook", command=lambda: sua_key_don("Discord Webhook", "DISCORD_WEBHOOK_URL", "Webhook Discord hiện tại:", "Nhập Webhook Discord mới:"))
-menu_cai_dat.add_separator()
-menu_cai_dat.add_command(label="Tai cac ung dung khac", command=mo_popup_ung_dung_khac)
-# Disabled: game image downloader menu removed in audio-tool version.
-# menu_cai_dat.add_command(label="📥 Tải ảnh còn thiếu cho Game Đoán Chữ", command=tai_anh_con_thieu_game_thread)
-
-
-
-menu_cai_dat.add_command(
-    label="Sua Email va App Password",
-    command=lambda: sua_key_nhom(
-        "Email & App Password",
-        ["SENDER_EMAIL", "SENDER_NAME", "APP_PASSWORD"],
-        ["Email gửi", "Tên gửi", "App Password"],
-        show_pws=[False, False, True]
-    )
-)
-
-menu_cai_dat.add_command(
-    label="Sua AWS Keys",
-    command=lambda: sua_key_nhom(
-        "AWS Keys",
-        ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"],
-        ["Access Key ID", "Secret Access Key", "Region"],
-        show_pws=[False, True, False]
-    )
-)
-
-
-# Chỉ cần tạo 1 menubar, gắn menu_cai_dat:
-menubar = tk.Menu(root)
-menubar.add_cascade(label="Cai dat", menu=menu_cai_dat)
-if sys.platform != "darwin":
-    root.config(menu=menubar)
+# Tk menubar trên macOS đang gây crash khi khởi động, nên giữ các chức năng cấu hình qua nút Cài đặt trong UI.
 
 #+++++++=====
 # PHÍM TẮT MÀN HÌNH TẠM THỜI
@@ -9819,5 +9934,6 @@ if os.name == "nt":
 
 #=====================
 
+boot_log("Entering mainloop")
 
 root.mainloop()

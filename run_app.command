@@ -1,4 +1,4 @@
 #!/bin/zsh
 set -euo pipefail
-cd "$(dirname "$0")"
-exec "/usr/local/bin/python3.12" app.pyw
+APP_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "$APP_DIR/launch_texttomp3m4a.sh" "$APP_DIR"
