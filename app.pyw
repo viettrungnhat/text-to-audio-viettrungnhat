@@ -1133,52 +1133,13 @@ def thong_bao_loi_cauhinh(loai, chi_tiet="", hien_popup=True):
 #==================
 
 # === GitHub Models ===
-# GitHub Models exposes an OpenAI-compatible chat-completions endpoint.  This is
-# intentionally separate from the old OpenAI key so an `sk-...` key is never
-# sent to GitHub by accident.
+# GitHub Models đã bị retire; giữ lại biến cũ để tương thích dữ liệu cũ,
+# nhưng app không còn hiển thị hay sử dụng nó nữa.
 GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
 GITHUB_MODELS_CATALOG_URL = "https://models.github.ai/catalog/models"
 GITHUB_MODELS_API_VERSION = "2022-11-28"
 GITHUB_MODELS_MODEL = "openai/gpt-4.1"
-GITHUB_MODELS_RETIRED_NOTICE = (
-    "GitHub Models đã bị retire nên không còn kiểm tra / gọi được nữa.\n"
-    "Hãy chuyển sang Gemini hoặc Google TTS cho chức năng đọc và hỏi AI."
-)
-
-
-def _create_github_models_client(token):
-    """Return a client only after a token has been configured.
-
-    Recent OpenAI SDK versions reject an empty api_key during construction, so
-    the app must remain usable before the user opens Settings for the first
-    time.
-    """
-    if not token:
-        return None
-    try:
-        return OpenAI(base_url=GITHUB_MODELS_BASE_URL, api_key=token)
-    except ImportError as exc:
-        print(f"⚠ Không khởi tạo được GitHub Models client: {exc}")
-        return None
-
-
-def _is_github_models_retired_error(error):
-    text = str(error).lower()
-    return (
-        "410" in text
-        or "gone" in text
-        or "retired" in text
-        or "models.github.ai" in text
-    )
-
-
-if not is_valid(GITHUB_MODELS_TOKEN, is_github_models_token):
-    thong_bao_loi_cauhinh(
-        "GitHub Models token",
-        "Sai định dạng hoặc rỗng. Hãy nhập GitHub PAT (ghp_... hoặc github_pat_...).",
-        hien_popup=False,
-    )
-    GITHUB_MODELS_TOKEN = ""
+GITHUB_MODELS_RETIRED_NOTICE = "GitHub Models đã bị retire nên không còn dùng được nữa."
 
 if not is_valid(GEMINI_API_KEY, is_gemini):
     thong_bao_loi_cauhinh("Gemini API Key", "Sai định dạng hoặc rỗng → dùng mặc định.", hien_popup=False)
@@ -1190,7 +1151,7 @@ if not is_valid(DISCORD_WEBHOOK_URL, is_webhook):
     DISCORD_WEBHOOK_URL = config_default.get("DISCORD_WEBHOOK_URL", "")
 
 #===========================BIẾN TOÀN CỤC ============================================================BIẾN TOÀN CỤC===============
-client = _create_github_models_client(GITHUB_MODELS_TOKEN)
+client = None
 #Biến điều khiển đọc âm thanh
 doc_thread = None
 dang_doc = False
@@ -1718,25 +1679,9 @@ Cảm ơn bạn đã sử dụng ứng dụng.
     ask_password_with_keyboard(thuc_hien)
 
 #=======================NHÓM  - HỎI A.I , ĐỌC ĐỀ, XUẤT MP3====
-#hàm hỏi A.I qua GitHub Models
+#hàm hỏi A.I qua GitHub Models cũ, nay chuyển sang Gemini để tránh lỗi retire
 def goi_github_models_cau_hoi(prompt):
-    try:
-        if client is None:
-            raise RuntimeError(
-                "GitHub Models API key chưa được cấu hình. "
-                "Mở Cài đặt → Sửa GitHub Models Token để nhập GitHub PAT."
-            )
-        response = client.chat.completions.create(
-            model=GITHUB_MODELS_MODEL,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        if _is_github_models_retired_error(e):
-            print(GITHUB_MODELS_RETIRED_NOTICE)
-            return "GitHub Models đã bị retire nên chức năng này không còn dùng được."
-        thong_bao_loi_api(e, "GitHub Models")
-        return f"Lỗi GitHub Models: {e}"
+    return goi_gemini_cau_hoi(prompt)
 ##có chọn ngôn ngữ
 def goi_gemini_cau_hoi(prompt):
     from langdetect import detect
@@ -1794,30 +1739,7 @@ Nội dung yêu cầu là:
 
 
 def gui_hoi_github_models():
-    cau_hoi = entry_cau_hoi.get().strip()
-    if not cau_hoi:
-        messagebox.showwarning("Chưa nhập câu hỏi", "Hãy nhập nội dung để hỏi.")
-        return
-
-    txt_de.delete("1.0", tk.END)
-    txt_de.insert(tk.END, "⏳ Đang gửi tới GitHub Models ...\n")
-
-    def call():
-        try:
-            ket_qua = goi_github_models_cau_hoi(cau_hoi)
-            if any(x in ket_qua.lower() for x in ["github models", "quota", "error", "api key", "invalid", "401", "403"]):
-                raise Exception("GitHub Models có thể đang bận")
-
-            txt_de.delete("1.0", tk.END)
-            txt_de.insert(tk.END, ket_qua)
-        except:
-            txt_de.delete("1.0", tk.END)
-            txt_de.insert(tk.END, "⚠ GitHub Models có thể đang bận, chuyển sang Gemini ...\n⏳ Đang hỏi Gemini ...\n")
-            ket_qua = goi_gemini_cau_hoi(cau_hoi)
-            txt_de.delete("1.0", tk.END)
-            txt_de.insert(tk.END, ket_qua)
-
-    threading.Thread(target=call, daemon=True).start()
+    gui_hoi_gemini()
 def gui_hoi_gemini(on_done=None):
     cau_hoi = entry_cau_hoi.get().strip()
     if not cau_hoi:
@@ -8670,15 +8592,15 @@ def create_frame_noi_dung(parent):
     scrollbar.config(command=txt_de.yview)
 
     # Khung hỏi GitHub Models/Gemini sát mép dưới trái (dưới txt_de)
-    frame_hoi_gpt = tk.LabelFrame(frame_noi_dung, text="🧠 Hỏi GitHub Models hoặc Gemini", font=("Arial", 10, "bold"), bg="#f0fff0", fg="darkgreen")
+    frame_hoi_gpt = tk.LabelFrame(frame_noi_dung, text="🧠 Hỏi Gemini", font=("Arial", 10, "bold"), bg="#f0fff0", fg="darkgreen")
     frame_hoi_gpt.place(x=10, y=520, width=840, height=100)
 
     entry_cau_hoi = tk.Entry(frame_hoi_gpt, font=("Arial", 9))
     entry_cau_hoi.place(x=8, y=8, width=395, height=28)
     attach_mouse_text_menu(entry_cau_hoi)
     
-    tk.Button(frame_hoi_gpt, text="Hỏi GitHub", bg="#ffe6e6", fg="red", font=("Arial", 10, "bold"),
-              command=gui_hoi_github_models).place(x=410, y=8, width=65, height=28)
+    tk.Button(frame_hoi_gpt, text="Hỏi Gemini", bg="#ffe6e6", fg="red", font=("Arial", 10, "bold"),
+              command=gui_hoi_gemini).place(x=400, y=8, width=75, height=28)
     tk.Button(frame_hoi_gpt, text="Hỏi Mẹ", bg="#e6ffe6", fg="green", font=("Arial", 10, "bold"),
               command=gui_hoi_gemini).place(x=480, y=8, width=65, height=28)
     tk.Button(frame_hoi_gpt, text="🎙Nói", font=("Arial", 8),
@@ -9092,16 +9014,6 @@ btn_bung_man_hinh.place(x=10, y=8, width=120, height=28)
 
 menu_cai_dat = tk.Menu(root, tearoff=0)
 menu_cai_dat.add_command(
-    label="Sửa GitHub Models Token",
-    command=lambda: sua_key_don(
-        "GitHub Models Token",
-        "GITHUB_MODELS_TOKEN",
-        "GitHub PAT hiện tại:",
-        "Nhập GitHub PAT mới:",
-        show_pw=True,
-    ),
-)
-menu_cai_dat.add_command(
     label="Sửa Gemini API KEY",
     command=lambda: sua_key_don(
         "Gemini API KEY cho khung chat",
@@ -9421,7 +9333,7 @@ def sua_key_don(loai, key_field, label_hientai, label_moi, show_pw=False):
             top.protocol("WM_DELETE_WINDOW", top.destroy)
             set_popup_icon(top)
             top.title(f"Sửa {loai}")
-            top.geometry("560x340" if key_field == "GITHUB_MODELS_TOKEN" else "560x260")
+            top.geometry("560x260")
             top.grab_set()
             top.resizable(False, False)
 
@@ -9435,25 +9347,6 @@ def sua_key_don(loai, key_field, label_hientai, label_moi, show_pw=False):
             ent_new = tk.Entry(top, font=("Arial", 11), width=60, show="*" if show_pw else None)
             ent_new.pack(pady=2)
 
-            if key_field == "GITHUB_MODELS_TOKEN":
-                tk.Label(
-                    top,
-                    text=(
-                        "Dùng GitHub Personal Access Token (PAT).\n"
-                        "Fine-grained PAT cần quyền Models: Read; classic PAT cần scope models.\n"
-                        "Không chia sẻ token cho người khác."
-                    ),
-                    justify="left",
-                    wraplength=510,
-                    fg="#444444",
-                ).pack(padx=18, pady=(8, 2), anchor="w")
-                tk.Button(
-                    top,
-                    text="Mở GitHub để tạo token",
-                    command=lambda: open_path_cross_platform("https://github.com/settings/personal-access-tokens/new"),
-                    fg="blue",
-                ).pack(pady=(0, 2))
-
             def luu():
                 new_value = _normalize_secret_text(ent_new.get())
                 if not new_value:
@@ -9466,11 +9359,8 @@ def sua_key_don(loai, key_field, label_hientai, label_moi, show_pw=False):
                     unprotect_file(CONFIG_FILE)  # Gỡ bảo vệ
                     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                         json.dump(config, f, indent=2, ensure_ascii=False)
-                    global GITHUB_MODELS_TOKEN, GEMINI_API_KEY, GOOGLE_TTS_API_KEY, DISCORD_WEBHOOK_URL, client
-                    if key_field == "GITHUB_MODELS_TOKEN":
-                        GITHUB_MODELS_TOKEN = new_value
-                        client = _create_github_models_client(GITHUB_MODELS_TOKEN)
-                    elif key_field == "GEMINI_API_KEY":
+                    global GEMINI_API_KEY, GOOGLE_TTS_API_KEY, DISCORD_WEBHOOK_URL
+                    if key_field == "GEMINI_API_KEY":
                         GEMINI_API_KEY = new_value
                     elif key_field == "GOOGLE_TTS_API_KEY":
                         GOOGLE_TTS_API_KEY = new_value
@@ -9497,41 +9387,7 @@ def sua_key_don(loai, key_field, label_hientai, label_moi, show_pw=False):
                         return
                     try:
                         import requests
-                        if key_field == "GITHUB_MODELS_TOKEN":
-                            if not is_github_models_token(new_value):
-                                raise Exception("❌ Token GitHub không đúng định dạng. Token PAT phải bắt đầu bằng 'ghp_' hoặc 'github_pat_'.")
-                            try:
-                                response = requests.get(
-                                    GITHUB_MODELS_CATALOG_URL,
-                                    headers={
-                                        "Accept": "application/vnd.github+json",
-                                        "Authorization": f"Bearer {new_value}",
-                                        "X-GitHub-Api-Version": GITHUB_MODELS_API_VERSION,
-                                    },
-                                    timeout=15,
-                                )
-                                if response.status_code == 410:
-                                    raise Exception(GITHUB_MODELS_RETIRED_NOTICE)
-                                if response.status_code == 401:
-                                    raise Exception("❌ Token GitHub không hợp lệ hoặc đã bị thu hồi.")
-                                if response.status_code == 403:
-                                    raise Exception("❌ Token chưa có quyền GitHub Models. Fine-grained PAT cần Models: Read; classic PAT cần scope 'models'.")
-                                if response.status_code == 429:
-                                    raise Exception("❌ GitHub Models đang giới hạn lượt dùng. Hãy chờ quota được làm mới rồi thử lại.")
-                                response.raise_for_status()
-                            except Exception as e:
-                                if _is_github_models_retired_error(e):
-                                    raise Exception(GITHUB_MODELS_RETIRED_NOTICE)
-                                msg = str(e)
-                                if "quota" in msg.lower() or "rate limit" in msg.lower():
-                                    raise Exception("❌ Token hợp lệ nhưng GitHub Models đã hết lượt miễn phí / bị giới hạn. Hãy chờ rồi thử lại.")
-                                elif "Token GitHub" in msg or "quyền GitHub Models" in msg:
-                                    raise
-                                else:
-                                    raise Exception(f"❌ Không kiểm tra được GitHub Models: {e}")
-                            messagebox.showinfo("OK", "✅ GitHub Models token hoạt động!", parent=top)
-
-                        elif key_field == "GEMINI_API_KEY":
+                        if key_field == "GEMINI_API_KEY":
                             temp_client = genai.Client(api_key=new_value)
                             temp_client.models.generate_content(
                                 model="gemini-1.5-flash",
@@ -9590,7 +9446,6 @@ def sua_key_don(loai, key_field, label_hientai, label_moi, show_pw=False):
 
 
 API_KEY_SETTINGS = {
-    "GitHub Models": ("GitHub Models Token", "GITHUB_MODELS_TOKEN", "GitHub PAT hiện tại:", "Nhập GitHub PAT mới:"),
     "Gemini": ("Gemini API KEY cho khung chat", "GEMINI_API_KEY", "Gemini Key hiện tại:", "Nhập Gemini Key mới:"),
     "Google TTS": ("API key cho Google TTS", "GOOGLE_TTS_API_KEY", "Google TTS Key hiện tại:", "Nhập Google TTS Key mới:"),
     "Discord": ("Discord Webhook", "DISCORD_WEBHOOK_URL", "Webhook Discord hiện tại:", "Nhập Webhook Discord mới:"),
@@ -9613,8 +9468,6 @@ def _api_key_service_from_error(error_text, context=""):
         return "Gemini"
     if any(word in text for word in ("text-to-speech", "texttospeech", "google cloud tts", "google tts")):
         return "Google TTS"
-    if any(word in text for word in ("github models", "models.github.ai", "github pat", "github token")):
-        return "GitHub Models"
     if any(word in text for word in ("discord", "webhook")):
         return "Discord"
     if any(word in text for word in ("smtp", "email", "app password", "535")):
@@ -9660,10 +9513,7 @@ def hien_popup_loi_api_key(service, error_text, context=""):
         guidance = "Hãy kiểm tra hạn mức, thanh toán và quyền dùng API trong tài khoản dịch vụ."
     elif hint == "restricted":
         headline = f"Key của {service} hợp lệ nhưng đang bị chặn quyền truy cập."
-        if service == "GitHub Models":
-            guidance = "Hãy tạo lại GitHub PAT: fine-grained cần Models: Read, còn classic cần scope 'models'; rồi dán vào Cài đặt."
-        else:
-            guidance = "Hãy kiểm tra API đã bật đúng chưa, key có bị giới hạn sai dịch vụ, IP, referrer hoặc project không."
+        guidance = "Hãy kiểm tra API đã bật đúng chưa, key có bị giới hạn sai dịch vụ, IP, referrer hoặc project không."
     elif hint == "expired":
         headline = f"Key của {service} có thể đã bị xoá, thu hồi hoặc hết hạn."
         guidance = "Hãy tạo key mới hoặc kiểm tra lại key đang dùng có còn tồn tại không."
@@ -9753,7 +9603,7 @@ def gioi_thieu_ung_dung():
      Link tải exe : https://tuadenu.github.io/smartlearning/latest.html
     - Hẹn giờ tự động thông minh file nghe, bài đọc cho từng học viên các khung giờ khác nhau, có chuông thông báo và gọi đúng tên học viên
     - Tạo đề thông minh luyện tập: Toán, Ngoại ngữ, Tự luận, Trắc nghiệm...Đa ngôn ngữ các trình độ , phạm vi tuỳ chọn
-    - Tích hợp GitHub Models & Gemini tương tác thông minh với học viên, có thể in ra trực tiếp 1 click
+    - Tích hợp Gemini tương tác thông minh với học viên, có thể in ra trực tiếp 1 click
     - Hẹn giờ phát nhạc - kết hợp camera gửi ảnh
     - Điều khiển thiết bị Broadlink ,nhà thông minh, học lệnh điều khiển với 1 nút nhấn
     - Gửi ảnh ở bàn học 3 phút/lần (hoặc tuỳ chọn với 3 camera) qua Telegram, Discord cho giáo viên, phụ huynh học viên hoặc chính học viên thông minh
