@@ -1140,6 +1140,10 @@ GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
 GITHUB_MODELS_CATALOG_URL = "https://models.github.ai/catalog/models"
 GITHUB_MODELS_API_VERSION = "2022-11-28"
 GITHUB_MODELS_MODEL = "openai/gpt-4.1"
+GITHUB_MODELS_RETIRED_NOTICE = (
+    "GitHub Models đã bị retire nên không còn kiểm tra / gọi được nữa.\n"
+    "Hãy chuyển sang Gemini hoặc Google TTS cho chức năng đọc và hỏi AI."
+)
 
 
 def _create_github_models_client(token):
@@ -1156,6 +1160,16 @@ def _create_github_models_client(token):
     except ImportError as exc:
         print(f"⚠ Không khởi tạo được GitHub Models client: {exc}")
         return None
+
+
+def _is_github_models_retired_error(error):
+    text = str(error).lower()
+    return (
+        "410" in text
+        or "gone" in text
+        or "retired" in text
+        or "models.github.ai" in text
+    )
 
 
 if not is_valid(GITHUB_MODELS_TOKEN, is_github_models_token):
@@ -1718,6 +1732,9 @@ def goi_github_models_cau_hoi(prompt):
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
+        if _is_github_models_retired_error(e):
+            print(GITHUB_MODELS_RETIRED_NOTICE)
+            return "GitHub Models đã bị retire nên chức năng này không còn dùng được."
         thong_bao_loi_api(e, "GitHub Models")
         return f"Lỗi GitHub Models: {e}"
 ##có chọn ngôn ngữ
@@ -9073,11 +9090,81 @@ btn_bung_man_hinh = tk.Button(
 )
 btn_bung_man_hinh.place(x=10, y=8, width=120, height=28)
 
+menu_cai_dat = tk.Menu(root, tearoff=0)
+menu_cai_dat.add_command(
+    label="Sửa GitHub Models Token",
+    command=lambda: sua_key_don(
+        "GitHub Models Token",
+        "GITHUB_MODELS_TOKEN",
+        "GitHub PAT hiện tại:",
+        "Nhập GitHub PAT mới:",
+        show_pw=True,
+    ),
+)
+menu_cai_dat.add_command(
+    label="Sửa Gemini API KEY",
+    command=lambda: sua_key_don(
+        "Gemini API KEY cho khung chat",
+        "GEMINI_API_KEY",
+        "Gemini Key hiện tại:",
+        "Nhập Gemini Key mới:",
+        show_pw=True,
+    ),
+)
+menu_cai_dat.add_command(
+    label="Sửa Google TTS API KEY",
+    command=lambda: sua_key_don(
+        "API key cho Google TTS",
+        "GOOGLE_TTS_API_KEY",
+        "Google TTS Key hiện tại:",
+        "Nhập Google TTS Key mới:",
+        show_pw=True,
+    ),
+)
+menu_cai_dat.add_command(
+    label="Sửa Discord Webhook",
+    command=lambda: sua_key_don(
+        "Discord Webhook",
+        "DISCORD_WEBHOOK_URL",
+        "Webhook Discord hiện tại:",
+        "Nhập Webhook Discord mới:",
+        show_pw=False,
+    ),
+)
+menu_cai_dat.add_command(
+    label="Sửa Email & App Password",
+    command=lambda: sua_key_nhom(
+        "Email & App Password",
+        ["SENDER_EMAIL", "SENDER_NAME", "APP_PASSWORD"],
+        ["Email gửi", "Tên gửi", "App Password"],
+        show_pws=[False, False, True],
+    ),
+)
+menu_cai_dat.add_command(
+    label="Sửa AWS Keys",
+    command=lambda: sua_key_nhom(
+        "AWS Keys",
+        ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"],
+        ["Access Key ID", "Secret Access Key", "Region"],
+        show_pws=[False, True, False],
+    ),
+)
+menu_cai_dat.add_separator()
+menu_cai_dat.add_command(
+    label="Khởi động cùng Windows",
+    command=lambda: cau_hinh_khoi_dong_cung_win(),
+    state="disabled" if os.name != "nt" else "normal",
+)
+menu_cai_dat.add_command(label="Giới thiệu ứng dụng", command=lambda: gioi_thieu_ung_dung())
+menu_cai_dat.add_command(label="Các ứng dụng khác", command=lambda: mo_popup_ung_dung_khac())
+
 def mo_cai_dat_popup(event=None):
     try:
         x = root.winfo_rootx() + 10
         y = root.winfo_rooty() + 40
         menu_cai_dat.tk_popup(x, y)
+    except Exception as e:
+        messagebox.showerror("Lỗi", f"Không mở được Cài đặt:\n{e}")
     finally:
         try:
             menu_cai_dat.grab_release()
@@ -9086,7 +9173,7 @@ def mo_cai_dat_popup(event=None):
 
 btn_cai_dat = tk.Button(
     root,
-    text="Cai dat",
+    text="Cài đặt",
     font=("Arial", 10, "bold"),
     bg="#e8f0fe",
     fg="#0b57d0",
@@ -9250,9 +9337,14 @@ root.after(2500, lambda: boot_log("UI is ready"))
 
 #============
 def cau_hinh_khoi_dong_cung_win():
-    import winreg
     import sys, os
     from tkinter import messagebox
+
+    if os.name != "nt":
+        messagebox.showwarning("Không hỗ trợ", "Tính năng này chỉ hoạt động trên Windows.")
+        return
+
+    import winreg
 
     key = r"Software\Microsoft\Windows\CurrentVersion\Run"
     app_name = "AppSmartLearning"
@@ -9418,6 +9510,8 @@ def sua_key_don(loai, key_field, label_hientai, label_moi, show_pw=False):
                                     },
                                     timeout=15,
                                 )
+                                if response.status_code == 410:
+                                    raise Exception(GITHUB_MODELS_RETIRED_NOTICE)
                                 if response.status_code == 401:
                                     raise Exception("❌ Token GitHub không hợp lệ hoặc đã bị thu hồi.")
                                 if response.status_code == 403:
@@ -9426,6 +9520,8 @@ def sua_key_don(loai, key_field, label_hientai, label_moi, show_pw=False):
                                     raise Exception("❌ GitHub Models đang giới hạn lượt dùng. Hãy chờ quota được làm mới rồi thử lại.")
                                 response.raise_for_status()
                             except Exception as e:
+                                if _is_github_models_retired_error(e):
+                                    raise Exception(GITHUB_MODELS_RETIRED_NOTICE)
                                 msg = str(e)
                                 if "quota" in msg.lower() or "rate limit" in msg.lower():
                                     raise Exception("❌ Token hợp lệ nhưng GitHub Models đã hết lượt miễn phí / bị giới hạn. Hãy chờ rồi thử lại.")
